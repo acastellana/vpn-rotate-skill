@@ -1,9 +1,34 @@
 ---
 name: vpn-rotate-skill
 description: Bypass API rate limits by rotating VPN servers. Works with any OpenVPN-compatible VPN (ProtonVPN, NordVPN, Mullvad, etc.). Automatically rotates to new server every N requests for fresh IPs. Use for high-volume scraping, government APIs, geo-restricted data.
+requirements:
+  - network
+  - sudo
 ---
 
 # VPN Rotate Skill
+
+## ⚠️ Security Notice
+
+This skill modifies system configuration:
+
+| Change | File | Purpose |
+|--------|------|---------|
+| Sudoers entry | `/etc/sudoers.d/vpn-rotate` | Allow passwordless `openvpn` and `killall` |
+| VPN credentials | `~/.vpn/creds.txt` | Stored with 600 permissions |
+
+**Before installing:**
+- Review `scripts/setup.sh` to understand all changes
+- The sudoers entry grants NOPASSWD for: `/usr/sbin/openvpn`, `/usr/bin/killall`, `/bin/kill`
+
+**To rollback:**
+```bash
+# Remove sudoers entry
+sudo rm /etc/sudoers.d/vpn-rotate
+
+# Remove credentials (optional)
+rm ~/.vpn/creds.txt
+```
 
 Rotate VPN servers to bypass API rate limits. Works with any OpenVPN-compatible VPN.
 

@@ -24,6 +24,11 @@ DEFAULT_CONFIG_DIR = Path.home() / ".vpn" / "servers"
 DEFAULT_CREDS_FILE = Path.home() / ".vpn" / "creds.txt"
 PID_FILE = Path("/tmp/vpn-rotate.pid")
 LOG_FILE = Path("/tmp/vpn-rotate.log")
+SYSTEMD_RUN_BIN = "/usr/bin/systemd-run"
+SYSTEMCTL_BIN = "/usr/bin/systemctl"
+OPENVPN_BIN = "/usr/sbin/openvpn"
+VPN_UNIT_NAME = "openclaw-vpn-rotate"
+VPN_UNIT = f"{VPN_UNIT_NAME}.service"
 
 # Also check ProtonVPN paths as fallback
 PROTON_CONFIG_DIR = Path.home() / ".config" / "protonvpn" / "servers"
@@ -77,6 +82,13 @@ class VPN:
     
     def _run(self, cmd: List[str]) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _reset_unit(self):
+        self._run([SYSTEMCTL_BIN, "--user", "reset-failed", VPN_UNIT])
+
+    def _stop_unit(self):
+        self._run([SYSTEMCTL_BIN, "--user", "stop", VPN_UNIT])
+        self._reset_unit()
     
     def get_servers(self, country: str = None) -> List[Path]:
         """Get available .ovpn config files."""
@@ -125,10 +137,29 @@ class VPN:
             return False
         
         self._log(f"🔌 Connecting to {config.name}...")
+
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE.touch(exist_ok=True)
+        try:
+            LOG_FILE.chmod(0o666)
+        except PermissionError:
+            pass
+
+        PID_FILE.unlink(missing_ok=True)
+        self._reset_unit()
         
-        # Start OpenVPN
+        # Start OpenVPN in its own transient unit so it does not inherit the
+        # gateway service cgroup.
         result = self._run([
-            "sudo", "-n", "openvpn",
+            SYSTEMD_RUN_BIN,
+            "--user",
+            "--unit", VPN_UNIT_NAME,
+            "--service-type=forking",
+            "--property", f"PIDFile={PID_FILE}",
+            "--property", "Restart=no",
+            "--collect",
+            "--quiet",
+            "sudo", "-n", OPENVPN_BIN,
             "--config", str(config),
             "--auth-user-pass", str(self.creds_file),
             "--daemon",
@@ -136,8 +167,12 @@ class VPN:
             "--log", str(LOG_FILE)
         ])
         
-        if result.returncode != 0 and "password" in result.stderr.lower():
-            self._log("❌ sudo requires password. Run setup.sh first.")
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()
+            if "password" in stderr.lower():
+                self._log("❌ sudo requires password. Run setup.sh first.")
+            else:
+                self._log(f"❌ Failed to launch VPN service: {stderr or 'unknown error'}")
             return False
         
         # Wait for connection
@@ -150,21 +185,27 @@ class VPN:
                 return True
         
         self._log("❌ Connection timeout")
+        self.disconnect()
         return False
     
     def disconnect(self) -> bool:
         """Disconnect VPN."""
-        # Kill by PID
+        pid = None
         if PID_FILE.exists():
             try:
                 pid = PID_FILE.read_text().strip()
-                self._run(["sudo", "-n", "kill", pid])
-                PID_FILE.unlink(missing_ok=True)
-            except:
-                pass
-        
-        # Fallback killall
-        self._run(["sudo", "-n", "killall", "openvpn"])
+            except OSError:
+                pid = None
+
+        if pid:
+            self._run(["sudo", "-n", "kill", pid])
+            time.sleep(1)
+
+        if self.is_connected():
+            self._run(["sudo", "-n", "pkill", "-x", "openvpn"])
+
+        PID_FILE.unlink(missing_ok=True)
+        self._stop_unit()
         self._current_server = None
         return True
     
